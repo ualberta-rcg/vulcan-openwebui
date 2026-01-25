@@ -15,11 +15,7 @@ stringData:
   REDIS_PASSWORD: gT9@Xz!fV1qLp#73MwYu@Kd!9RzHbX6c
 
 ---
-# Secret for Google Search API (must be created before deployment)
-# Run: kubectl create secret generic openwebui-secrets -n openwebui \
-#   --from-literal=google-search-api-key='YOUR_API_KEY' \
-#   --from-literal=google-search-engine-id='YOUR_ENGINE_ID'
-# Or create manually and update this placeholder:
+# Secret for Perplexity Search API
 apiVersion: v1
 kind: Secret
 metadata:
@@ -27,8 +23,7 @@ metadata:
   namespace: openwebui
 type: Opaque
 stringData:
-  google-search-api-key: ""  # Replace with your Google Custom Search API key
-  google-search-engine-id: ""  # Replace with your Search Engine ID
+  perplexity-api-key: ""
 
 ---
 apiVersion: v1
@@ -272,38 +267,20 @@ spec:
             - name: AUDIO_TTS_ENGINE
               value: ""  # Empty = disabled, users can configure their own
 
-            # ---- Web Search (Google Custom Search via GCP) ----
-            # Instructions to set up Google Custom Search:
-            # 1. Create Custom Search Engine: https://programmablesearchengine.google.com/
-            #    - Click "Add" to create new search engine
-            #    - Enter sites to search (or leave blank for web-wide search)
-            #    - Copy your Search Engine ID (format: 123456789012345678901:abcdefghijk)
-            # 2. Get API Key from GCP: https://console.cloud.google.com/
-            #    - Enable "Custom Search API" in your project
-            #    - Go to "Credentials" → "Create Credentials" → "API Key"
-            #    - Copy your API key
-            # 3. Create Kubernetes Secret:
-            #    kubectl create secret generic openwebui-secrets -n openwebui \
-            #      --from-literal=google-search-api-key='YOUR_API_KEY' \
-            #      --from-literal=google-search-engine-id='YOUR_ENGINE_ID'
-            # 4. Free tier: 100 queries/day, then $5 per 1,000 queries
+            # ---- Web Search (Perplexity AI Search) ----
+            # Perplexity provides AI-powered search with citations
+            # Better than Google for AI use cases - generates comprehensive answers
             - name: ENABLE_WEB_SEARCH
               value: "true"
 
             - name: RAG_WEB_SEARCH_ENGINE
-              value: "google"  # or tavily, perplexity (users can configure)
+              value: "perplexity"  # AI-powered search with citations
 
-            - name: GOOGLE_SEARCH_API_KEY
+            - name: PERPLEXITY_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: openwebui-secrets
-                  key: google-search-api-key
-
-            - name: GOOGLE_SEARCH_ENGINE_ID
-              valueFrom:
-                secretKeyRef:
-                  name: openwebui-secrets
-                  key: google-search-engine-id
+                  key: perplexity-api-key
 
             # ---- File Upload ----
             - name: MAX_FILE_SIZE
