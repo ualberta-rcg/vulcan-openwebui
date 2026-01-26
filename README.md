@@ -1,4 +1,4 @@
-# University of Alberta - Vulcan Open WebUI Kubernetes Deployment  
+# University of Alberta - Vulcan Open WebUI Deployment  
 
 ![Kubernetes](https://img.shields.io/badge/Kubernetes-1.24+-green?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
