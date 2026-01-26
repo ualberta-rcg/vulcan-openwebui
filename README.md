@@ -1,6 +1,6 @@
-# vulcan-openwebui
+# University of Alberta - Vulcan Cluster
 
-# University of Alberta - Vulcan Cluster - Open WebUI Kubernetes Deployment  
+# Open WebUI Kubernetes Deployment  
 
 ![Kubernetes](https://img.shields.io/badge/Kubernetes-1.24+-green?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
