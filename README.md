@@ -30,7 +30,7 @@ Kubernetes deployment configuration for **Open WebUI** on the Vulcan RKE2 cluste
 | Service | Image | Replicas | Purpose |
 |---|---|---|---|
 | Open WebUI | `ghcr.io/open-webui/open-webui:latest` | 2-15 (HPA) | Main application |
-| Qdrant | `qdrant/qdrant` (Helm) | 1 | Vector database for RAG |
+| Qdrant | `qdrant/qdrant` (Helm) | 5 (clustered) | Vector database for RAG |
 | PostgreSQL | `postgres:16` | 1 | Application database |
 | Redis | `redis:latest` | 1 | Sessions, websockets, cache |
 | Apache Tika | `apache/tika:latest-full` | 1-4 (HPA) | Document extraction |
@@ -193,7 +193,9 @@ kubectl rollout restart deploy/openwebui -n openwebui
 
 ### Qdrant Notes
 
-Qdrant runs on NFS storage (`nfs-client`). It logs a warning about NFS filesystem checks on startup — this is expected and documented in `qdrant-values.yaml`. Snapshot persistence is enabled as a recovery safety net.
+Qdrant runs as a 5-node Raft cluster (one per node) on NFS storage (`nfs-client`). It logs a warning about NFS filesystem checks on startup — this is expected and documented in `qdrant-values.yaml`. Snapshot persistence is enabled as a recovery safety net.
+
+> **Important:** The `qdrant-access` NetworkPolicy must allow p2p traffic (port 6335) between Qdrant pods for Raft consensus. This is already configured in `openwebui.yaml`.
 
 ---
 

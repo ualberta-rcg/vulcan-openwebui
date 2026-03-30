@@ -1,4 +1,4 @@
-replicaCount: 1
+replicaCount: 5  # SITE-SPECIFIC: one per node
 
 image:
   repository: docker.io/qdrant/qdrant
@@ -64,9 +64,17 @@ snapshotPersistence:
   size: 10Gi
   storageClassName: nfs-client  # SITE-SPECIFIC: your StorageClass
 
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: qdrant
+
 config:
   cluster:
-    enabled: false
+    enabled: true
   service:
     enable_tls: false
 

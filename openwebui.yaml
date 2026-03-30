@@ -865,6 +865,14 @@ spec:
           port: 6333
         - protocol: TCP
           port: 6334
+    # Qdrant cluster p2p — pods must reach each other for Raft consensus
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: qdrant
+      ports:
+        - protocol: TCP
+          port: 6335
     # SITE-SPECIFIC: allow Prometheus scraping — change namespace to match your monitoring stack
     - from:
         - namespaceSelector:
