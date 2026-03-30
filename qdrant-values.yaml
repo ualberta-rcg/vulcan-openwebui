@@ -1,0 +1,91 @@
+replicaCount: 1
+
+image:
+  repository: docker.io/qdrant/qdrant
+  pullPolicy: IfNotPresent
+  tag: ""
+
+fullnameOverride: "qdrant"
+
+service:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 6333
+      targetPort: 6333
+      protocol: TCP
+      checksEnabled: true
+    - name: grpc
+      port: 6334
+      targetPort: 6334
+      protocol: TCP
+      checksEnabled: false
+    - name: p2p
+      port: 6335
+      targetPort: 6335
+      protocol: TCP
+      checksEnabled: false
+
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 6
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 6
+  successThreshold: 1
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+# NOTE: Qdrant logs "Filesystem check failed ... NFS may cause data corruption"
+# on NFS storage. No official suppression flag exists. PowerScale/NFS is required
+# for this environment. Snapshot persistence is enabled as a recovery safety net.
+persistence:
+  accessModes: ["ReadWriteOnce"]
+  size: 20Gi
+  storageClassName: nfs-client  # SITE-SPECIFIC: your StorageClass
+
+snapshotPersistence:
+  enabled: true
+  accessModes: ["ReadWriteOnce"]
+  size: 10Gi
+  storageClassName: nfs-client  # SITE-SPECIFIC: your StorageClass
+
+config:
+  cluster:
+    enabled: false
+  service:
+    enable_tls: false
+
+apiKey:
+  valueFrom:
+    secretKeyRef:
+      name: openwebui-secrets
+      key: qdrant-api-key
+
+metrics:
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: rancher-monitoring  # SITE-SPECIFIC: match your Prometheus operator label
+    scrapeInterval: 30s
+    scrapeTimeout: 10s
+    targetPort: http
+    targetPath: "/metrics"
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1

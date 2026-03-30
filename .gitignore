@@ -1,0 +1,11 @@
+# Secrets - never commit files with real credentials
+*.secret
+*.env
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

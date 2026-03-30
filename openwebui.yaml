@@ -1,70 +1,5 @@
 ---
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: openwebui
-
----
-# Secret for Perplexity Search API
-apiVersion: v1
-kind: Secret
-metadata:
-  name: openwebui-secrets
-  namespace: openwebui
-type: Opaque
-stringData:
-  perplexity-api-key: "YOUR_PERPLEXITY_API_KEY_HERE"
-  webui-secret-key: "YOUR_WEBUI_SECRET_KEY_HERE"
-  postgres-password: "YOUR_POSTGRES_PASSWORD_HERE"
-  database-url: "postgresql://openwebui:YOUR_POSTGRES_PASSWORD_HERE@postgres:5432/openwebui"
-  youtube-loader-api-key: "YOUR_YOUTUBE_API_KEY_HERE"
-
----
-# Apache Tika Deployment (Content Extraction Engine for RAG)
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: tika
-  namespace: openwebui
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: tika
-  template:
-    metadata:
-      labels:
-        app: tika
-    spec:
-      containers:
-        - name: tika
-          image: apache/tika:latest-full  # Full version includes OCR with Tesseract
-          ports:
-            - containerPort: 9998
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "512Mi"
-            limits:
-              cpu: "2"
-              memory: "4Gi"  # Tika can be memory-intensive with OCR
----
-# Apache Tika Service
-apiVersion: v1
-kind: Service
-metadata:
-  name: tika
-  namespace: openwebui
-spec:
-  selector:
-    app: tika
-  ports:
-    - port: 9998
-      targetPort: 9998
-  type: ClusterIP
----
-
-# PostgreSQL PersistentVolumeClaim
+# PostgreSQL PVC
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -76,7 +11,7 @@ spec:
   resources:
     requests:
       storage: 20Gi
-  storageClassName: nfs-client
+  storageClassName: nfs-client  # SITE-SPECIFIC: your StorageClass
 
 ---
 # PostgreSQL Deployment
@@ -97,22 +32,37 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: pgvector/pgvector:pg16
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5432
           env:
             - name: POSTGRES_USER
               value: "openwebui"
-              
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: openwebui-secrets
                   key: postgres-password
-
             - name: POSTGRES_DB
               value: "openwebui"
-
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "openwebui"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "openwebui"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "256m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
@@ -137,20 +87,7 @@ spec:
   type: ClusterIP
 
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: openwebui-data
-  namespace: openwebui
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 50Gi
-  storageClassName: nfs-client
-
----
+# Redis PVC
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -162,9 +99,10 @@ spec:
   resources:
     requests:
       storage: 1Gi
-  storageClassName: nfs-client
+  storageClassName: nfs-client  # SITE-SPECIFIC: your StorageClass
 
 ---
+# Redis Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -182,24 +120,50 @@ spec:
     spec:
       containers:
         - name: redis
-          image: redis:7.2
+          image: redis:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 6379
-          volumeMounts:
-            - name: redis-data
-              mountPath: /data
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: redis-password
           command: ["sh", "-c"]
           args:
             - |
               exec redis-server \
                 --save "" \
                 --appendonly yes \
-                --requirepass "YOUR_REDIS_PASSWORD_HERE"
+                --requirepass "$REDIS_PASSWORD"
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
       volumes:
         - name: redis-data
           persistentVolumeClaim:
             claimName: redis-data
+
 ---
+# Redis Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -214,6 +178,104 @@ spec:
   type: ClusterIP
 
 ---
+# Apache Tika Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tika
+  namespace: openwebui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tika
+  template:
+    metadata:
+      labels:
+        app: tika
+    spec:
+      containers:
+        - name: tika
+          image: apache/tika:latest-full
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 9998
+          readinessProbe:
+            httpGet:
+              path: /tika
+              port: 9998
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /tika
+              port: 9998
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+
+---
+# Tika HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tika
+  namespace: openwebui
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tika
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+# Tika Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: tika
+  namespace: openwebui
+spec:
+  selector:
+    app: tika
+  ports:
+    - port: 9998
+      targetPort: 9998
+  type: ClusterIP
+
+---
+# Open WebUI PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openwebui-data
+  namespace: openwebui
+spec:
+  # NOTE: Ideally ReadWriteMany for multi-replica, but existing PVC is RWO and
+  # accessModes are immutable. NFS-backed RWO still allows multi-attach in practice.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: nfs-client  # SITE-SPECIFIC: your StorageClass
+
+---
+# Open WebUI Deployment (upgraded: pgvector -> qdrant)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -222,7 +284,12 @@ metadata:
   labels:
     app: openwebui
 spec:
-  replicas: 2
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: openwebui
@@ -231,32 +298,42 @@ spec:
       labels:
         app: openwebui
     spec:
+      terminationGracePeriodSeconds: 60
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: openwebui
+                topologyKey: kubernetes.io/hostname
+      # SITE-SPECIFIC: hostAliases — remove or replace with your internal DNS entries
       hostAliases:
-        - ip: "10.0.0.100"
+        - ip: "172.26.92.232"
           hostnames:
-            - ray-service
-        - ip: "10.0.0.101"
+            - ray
+        - ip: "172.26.92.29"
           hostnames:
-            - ldap-server-01.example.com
+            - vulcan01.ldap.computecanada.ca
             - ldap1
-            - ldap1.internal.local
-        - ip: "10.0.0.102"
+            - ldap1.vulcan.local
+        - ip: "172.26.92.30"
           hostnames:
-            - ldap-server-02.example.com
+            - vulcan02.ldap.computecanada.ca
             - ldap2
-            - ldap2.internal.local
+            - ldap2.vulcan.local
       containers:
         - name: openwebui
           image: ghcr.io/open-webui/open-webui:latest
-          imagePullPolicy: IfNotPresent
-
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
               name: http
 
           env:
             - name: WEBUI_NAME
-              value: "Example Cluster"
+              value: "Vulcan Cluster"  # SITE-SPECIFIC: your instance name
 
             - name: WEBUI_SECRET_KEY
               valueFrom:
@@ -270,11 +347,52 @@ spec:
                   name: openwebui-secrets
                   key: database-url
 
+            # ---- OAuth / OIDC ----
+            - name: OAUTH_CLIENT_ID
+              value: "llm.vulcan.alliancecan.ca"  # SITE-SPECIFIC: OIDC client ID
+
+            - name: OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: oauth-client-secret
+
+            - name: OPENID_PROVIDER_URL
+              value: "https://idp-dev.alliancecan.ca/.well-known/openid-configuration"  # SITE-SPECIFIC
+
+            - name: OAUTH_PROVIDER_NAME
+              value: "Digital Research Alliance of Canada"  # SITE-SPECIFIC
+
+            - name: OAUTH_SCOPES
+              value: "openid email profile ca.alliancecan.userinfo"  # SITE-SPECIFIC
+
+            - name: OPENID_REDIRECT_URI
+              value: "https://llm.vulcan.alliancecan.ca/oauth/oidc/callback"  # SITE-SPECIFIC: https://<your-domain>/oauth/oidc/callback
+
+            - name: ENABLE_OAUTH_SIGNUP
+              value: "true"
+
+            - name: OAUTH_EMAIL_CLAIM
+              value: "ccPrimaryEmail"  # SITE-SPECIFIC: depends on your OIDC provider
+
+            - name: OAUTH_USERNAME_CLAIM
+              value: "preferred_username"
+
+            - name: OAUTH_MERGE_ACCOUNTS_BY_EMAIL
+              value: "true"
+
+            - name: OAUTH_CLIENT_AUTH_METHOD
+              value: "client_secret_post"
+
+            - name: ENABLE_OAUTH_PERSISTENT_CONFIG
+              value: "false"
+
+            # ---- General ----
             - name: DATA_DIR
               value: "/app/backend/data"
 
             - name: WEBUI_URL
-              value: "https://openwebui.example.com"  # Required for OAuth/OIDC
+              value: "https://llm.vulcan.alliancecan.ca"  # SITE-SPECIFIC: your public URL
 
             - name: ENABLE_COMMUNITY_SHARING
               value: "true"
@@ -285,10 +403,10 @@ spec:
             - name: ENABLE_COMMENT_ON_SHARED_CHAT
               value: "true"
 
-            - name: ENABLE_API_KEYS  # Updated from deprecated ENABLE_API_KEY
+            - name: ENABLE_API_KEYS
               value: "true"
 
-            - name: ENABLE_USER_WEBHOOKS  # Explicitly enable user webhooks
+            - name: ENABLE_USER_WEBHOOKS
               value: "true"
 
             - name: ENABLE_SIGNUP
@@ -297,71 +415,44 @@ spec:
             - name: DEFAULT_USER_ROLE
               value: "user"
 
-            # ---- Vector Database (RAG) ----
-            - name: VECTOR_DB
-              value: "pgvector"
-            
-            - name: PGVECTOR_CREATE_EXTENSION
-              value: "true"  # Will try to auto-create pgvector extension
-
-            - name: PGVECTOR_INDEX_METHOD
-              value: "hnsw"  # Better query performance (optional)              
-
-            # ---- LDAP ----
-            - name: ENABLE_LDAP
-              value: "true"
-
-            - name: LDAP_SERVER_LABEL
-              value: "Example LDAP Server"
-
-            - name: LDAP_SERVER_HOST
-              value: "ldap-server-01.example.com"
-
-            - name: LDAP_SERVER_PORT
-              value: "636"
-
-            # LDAPS
-            - name: LDAP_USE_TLS
-              value: "true"
-
-            # Disable cert verification (IP pinning / hostAliases)
-            - name: LDAP_VALIDATE_CERT
+            - name: ENABLE_LOGIN_FORM
               value: "false"
 
-            # Username & mail attributes
-            - name: LDAP_ATTRIBUTE_FOR_USERNAME
-              value: "uid"
-
-            # Base DN for users
-            - name: LDAP_SEARCH_BASE
-              value: "dc=example,dc=com"
-
-            # Extra filter ONLY (username auto-added by Open WebUI)
-            - name: LDAP_SEARCH_FILTER
-              value: "(objectClass=posixAccount)"
-
-            - name: LDAP_ATTRIBUTE_FOR_MAIL
-              value: "uid"
-
-            # ---- Providers ----
             - name: DISABLE_PROVIDER_EDIT
-              value: "false"  # Allow users to add their own providers
+              value: "false"
 
-            # ---- General Settings ----
-            - name: ENABLE_LOGIN_FORM
+            # ---- Vector Database (Qdrant) ----
+            # Deployed via: helm install qdrant qdrant/qdrant -n openwebui -f qdrant-values.yaml
+            - name: VECTOR_DB
+              value: "qdrant"
+
+            - name: QDRANT_URI
+              value: "http://qdrant:6333"
+
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: qdrant-api-key
+
+            - name: ENABLE_QDRANT_MULTITENANCY_MODE
               value: "true"
 
-            - name: CORS_ALLOW_ORIGIN
-              value: "*"  # Required for websockets
+            - name: QDRANT_PREFER_GRPC
+              value: "false"
 
-            - name: ENABLE_WEBSOCKET_SUPPORT
-              value: "true"  # Explicit (default is true)              
-
+            # ---- Redis ----
             - name: REDIS_URL
-              value: "redis://:YOUR_REDIS_PASSWORD_HERE@redis:6379/0"
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: redis-url
 
             - name: WEBSOCKET_REDIS_URL
-              value: "redis://:YOUR_REDIS_PASSWORD_HERE@redis:6379/0"
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: redis-url
 
             - name: WEBSOCKET_MANAGER
               value: "redis"
@@ -372,16 +463,15 @@ spec:
             - name: ENABLE_CACHE
               value: "true"
 
-            # ---- RAG (Retrieval Augmented Generation) ----
+            # ---- RAG ----
             - name: ENABLE_RAG
               value: "true"
 
-            # ---- Content Extraction Engine (Tika) ----
             - name: CONTENT_EXTRACTION_ENGINE
-              value: "tika"  # Use Apache Tika for document processing
+              value: "tika"
 
             - name: TIKA_SERVER_URL
-              value: "http://tika:9998"  # Tika service URL in same namespace
+              value: "http://tika:9998"
 
             - name: ENABLE_RAG_HYBRID_SEARCH
               value: "true"
@@ -389,37 +479,73 @@ spec:
             - name: ENABLE_RAG_WEB_SEARCH
               value: "true"
 
-            # ---- Audio / Speech-to-Text (Local Whisper) ----
-            - name: AUDIO_STT_ENGINE
-              value: ""  # Empty = use local Whisper (no OpenAI needed)
+            # ---- RAG Embedding (Kubeflow inference) ----
+            - name: RAG_EMBEDDING_ENGINE
+              value: "openai"
 
-            - name: WHISPER_MODEL
-              value: "base"  # Options: tiny, base, small, medium, large
+            - name: RAG_OPENAI_API_BASE_URL
+              value: "https://inference.kubeflow.vulcan.alliancecan.ca/serving/api/v1"  # SITE-SPECIFIC: your inference endpoint
 
-            - name: WHISPER_COMPUTE_TYPE
-              value: "int8"  # int8 for CPU, float16 for GPU
+            - name: RAG_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: inference-api-key
 
-            - name: WHISPER_VAD_FILTER
-              value: "true"  # Voice Activity Detection
+            - name: RAG_EMBEDDING_MODEL
+              value: "bge-m3"
 
-            - name: WHISPER_MULTILINGUAL
+            # ---- RAG Reranking ----
+            - name: ENABLE_RAG_RERANKING
               value: "true"
 
-            # ---- Text-to-Speech (Optional - users can add their own) ----
-            - name: AUDIO_TTS_ENGINE
-              value: ""  # Empty = disabled, users can configure their own
+            - name: RAG_RERANKING_MODEL
+              value: "bge-reranker-v2-m3"
 
-            # ---- Web Search (Perplexity AI Search) ----
-            # Perplexity provides AI-powered search with citations
-            # Better than Google for AI use cases - generates comprehensive answers
+            # ---- Audio STT (Kubeflow inference) ----
+            - name: AUDIO_STT_ENGINE
+              value: "openai"
+
+            - name: AUDIO_STT_OPENAI_API_BASE_URL
+              value: "https://inference.kubeflow.vulcan.alliancecan.ca/serving/api/v1"  # SITE-SPECIFIC
+
+            - name: AUDIO_STT_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: inference-api-key
+
+            - name: AUDIO_STT_MODEL
+              value: "whisper-large-v3"
+
+            # ---- Audio TTS (Kubeflow inference) ----
+            - name: AUDIO_TTS_ENGINE
+              value: "openai"
+
+            - name: AUDIO_TTS_OPENAI_API_BASE_URL
+              value: "https://inference.kubeflow.vulcan.alliancecan.ca/serving/api/v1"  # SITE-SPECIFIC
+
+            - name: AUDIO_TTS_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: inference-api-key
+
+            - name: AUDIO_TTS_MODEL
+              value: "kokoro-82m"
+
+            - name: AUDIO_TTS_VOICE
+              value: "af_bella"
+
+            # ---- Web Search (Perplexity) ----
             - name: ENABLE_WEB_SEARCH
               value: "true"
 
             - name: RAG_WEB_SEARCH_ENGINE
-              value: "perplexity"  # AI-powered search with citations
+              value: "perplexity_search"
 
             - name: WEB_SEARCH_ENGINE
-              value: "perplexity"  # AI-powered search with citations
+              value: "perplexity_search"
 
             - name: PERPLEXITY_API_KEY
               valueFrom:
@@ -429,25 +555,25 @@ spec:
 
             # ---- File Upload ----
             - name: MAX_FILE_SIZE
-              value: "100000000"  # 100MB
+              value: "100000000"
 
             # ---- Performance ----
             - name: AIOHTTP_CLIENT_TIMEOUT
-              value: "300"
+              value: "180"
 
-            # ---- Voice Mode (STT + TTS) ----
+            # ---- Voice Mode ----
             - name: ENABLE_VOICE_MODE
-              value: "true"  # Enables voice conversations
+              value: "true"
 
             - name: VOICE_MODE_STT_ENGINE
-              value: ""  # Uses local Whisper (already configured above)
+              value: "openai"
 
             - name: VOICE_MODE_TTS_ENGINE
-              value: ""  # Users can configure their own TTS
+              value: "openai"
 
             # ---- YouTube Loader ----
             - name: ENABLE_YOUTUBE_LOADER
-              value: "true"  # Extract transcripts from YouTube videos for RAG
+              value: "true"
 
             - name: YOUTUBE_LOADER_API_KEY
               valueFrom:
@@ -455,61 +581,107 @@ spec:
                   name: openwebui-secrets
                   key: youtube-loader-api-key
 
+            # ---- Model Cache ----
             - name: MODEL_CACHE_SIZE
-              value: "1000"  # Max number of cached responses
+              value: "1000"
 
-            # ---- Workspaces (Already enabled by default, but explicit) ----
-            - name: ENABLE_WORKSPACES
-              value: "true"  # Team collaboration workspaces
-
-            - name: ENABLE_WORKSPACE_SHARING
-              value: "true"  # Share workspaces between users
-
-            # ---- Cloud Storage Integration (Users configure OAuth) ----
-            - name: ENABLE_GOOGLE_DRIVE
-              value: "true"  # Import documents from Google Drive
-
-            # Note: Users need to configure GOOGLE_DRIVE_CLIENT_ID and GOOGLE_DRIVE_CLIENT_SECRET
-
-            - name: ENABLE_ONEDRIVE
-              value: "true"  # Import documents from OneDrive
-
-            # ---- Autocomplete (Already enabled by default, but explicit) ----
-            - name: ENABLE_AUTOCOMPLETE
-              value: "true"  # AI-powered autocomplete in chat
-
-            # ---- Direct Connections (MCP/OpenAPI Tools) ----
-            - name: ENABLE_DIRECT_CONNECTIONS
-              value: "true"  # Connect to external tool servers (MCP/OpenAPI)
-
-            - name: DIRECT_CONNECTION_TIMEOUT
-              value: "30"  # Timeout for direct connections in seconds
-
-            # ---- Model Caching ----
             - name: ENABLE_BASE_MODELS_CACHE
-              value: "true"  # Cache base model list in memory
+              value: "true"
 
             - name: MODELS_CACHE_TTL
-              value: "300"  # Cache TTL in seconds (5 minutes)
+              value: "300"
+
+            # ---- Workspaces ----
+            - name: ENABLE_WORKSPACES
+              value: "true"
+
+            - name: ENABLE_WORKSPACE_SHARING
+              value: "true"
+
+            # ---- Cloud Storage ----
+            - name: ENABLE_GOOGLE_DRIVE
+              value: "true"
+
+            - name: ENABLE_ONEDRIVE
+              value: "true"
+
+            # ---- Autocomplete ----
+            - name: ENABLE_AUTOCOMPLETE
+              value: "true"
 
             - name: ENABLE_AUTOCOMPLETE_GENERATION
               value: "true"
 
-            # ---- Image Generation (AUTOMATIC1111) ----
+            # ---- Direct Connections (MCP/OpenAPI) ----
+            - name: ENABLE_DIRECT_CONNECTIONS
+              value: "true"
+
+            - name: DIRECT_CONNECTION_TIMEOUT
+              value: "30"
+
+            # ---- OpenAI-compatible API (Kubeflow inference) ----
+            - name: OPENAI_API_BASE_URL
+              value: "https://inference.kubeflow.vulcan.alliancecan.ca/serving/api/v1"  # SITE-SPECIFIC
+
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: openai-api-key
+
+            # ---- Image Generation (Kubeflow inference - kandinsky-3) ----
             - name: ENABLE_IMAGE_GENERATION
-              value: "true"  # Enable image generation features
+              value: "true"
 
             - name: IMAGE_GENERATION_ENGINE
-              value: "automatic1111"  # Use AUTOMATIC1111 engine
+              value: "openai"
 
-            - name: AUTOMATIC1111_BASE_URL
-              value: "http://ray:9202/automatic1111-adapter/"
+            - name: IMAGES_OPENAI_API_BASE_URL
+              value: "https://inference.kubeflow.vulcan.alliancecan.ca/serving/api/v1"  # SITE-SPECIFIC
+
+            - name: IMAGES_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: inference-api-key
+
+            - name: IMAGE_GENERATION_MODEL
+              value: "kandinsky-3"
 
             - name: IMAGE_SIZE
-              value: "1024x1024"  # Default image dimensions (WIDTHxHEIGHT, e.g., 1024x1024)
+              value: "768x768"
 
             - name: IMAGE_STEPS
-              value: "80"  # Default iteration steps for image generation
+              value: "80"
+
+            # ---- Image Editing (Kubeflow inference - kandinsky-3) ----
+            - name: ENABLE_IMAGE_EDIT
+              value: "true"
+
+            - name: IMAGE_EDIT_SIZE
+              value: "768x768"
+
+            - name: IMAGE_EDIT_ENGINE
+              value: "openai"
+
+            - name: IMAGES_EDIT_OPENAI_API_BASE_URL
+              value: "https://inference.kubeflow.vulcan.alliancecan.ca/serving/api/v1"  # SITE-SPECIFIC
+
+            - name: IMAGES_EDIT_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openwebui-secrets
+                  key: inference-api-key
+
+            - name: IMAGE_EDIT_MODEL
+              value: "kandinsky-3"
+
+            # ---- WebSocket / Logging ----
+            - name: ENABLE_WEBSOCKET_SUPPORT
+              value: "true"
+
+            - name: GLOBAL_LOG_LEVEL
+              value: "INFO"
 
           volumeMounts:
             - name: data
@@ -524,6 +696,7 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5
 
           livenessProbe:
             httpGet:
@@ -531,6 +704,8 @@ spec:
               port: http
             initialDelaySeconds: 30
             periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
 
           resources:
             requests:
@@ -550,15 +725,12 @@ spec:
             type: Directory
 
 ---
+# Open WebUI Service
 apiVersion: v1
 kind: Service
 metadata:
   name: openwebui
   namespace: openwebui
-  annotations:
-    traefik.ingress.kubernetes.io/service.sticky.cookie: "true"
-    traefik.ingress.kubernetes.io/service.nativelb: "true"
-
 spec:
   selector:
     app: openwebui
@@ -569,50 +741,7 @@ spec:
   type: ClusterIP
 
 ---
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: openwebui
-  namespace: openwebui
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: openwebui
-  minReplicas: 2
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-        - type: Percent
-          value: 50
-          periodSeconds: 60
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      policies:
-        - type: Percent
-          value: 100
-          periodSeconds: 30
-        - type: Pods
-          value: 2
-          periodSeconds: 30
-      selectPolicy: Max
-
----
+# PodDisruptionBudget
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -624,43 +753,149 @@ spec:
     matchLabels:
       app: openwebui
 
-        #---
-#apiVersion: cert-manager.io/v1
-#kind: Certificate
-#metadata:
-#  name: openwebui-example-com
-#  namespace: openwebui
-#spec:
-#  secretName: openwebui-vulcan-alliancecan-ca-tls
-#  issuerRef:
-#    name: letsencrypt-dns
-#    kind: ClusterIssuer
-#  commonName: openwebui.example.com
-#  dnsNames:
-#    - openwebui.example.com
+---
+# NetworkPolicy - restrict backend access to openwebui pods only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-access
+  namespace: openwebui
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: openwebui
+      ports:
+        - protocol: TCP
+          port: 5432
 
 ---
 apiVersion: networking.k8s.io/v1
-kind: Ingress
+kind: NetworkPolicy
 metadata:
-  name: openwebui-ingress
+  name: redis-access
   namespace: openwebui
-  annotations:
-#    traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
-  ingressClassName: traefik
-#  tls:
-#    - hosts:
-#        - openwebui.vulcan.alliancecan.ca
-#      secretName: openwebui-example-com-tls
-  rules:
-    - host: openwebui.example.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: openwebui
-                port:
-                  number: 80
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: openwebui
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qdrant-access
+  namespace: openwebui
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: qdrant
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: openwebui
+      ports:
+        - protocol: TCP
+          port: 6333
+        - protocol: TCP
+          port: 6334
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cattle-monitoring-system
+      ports:
+        - protocol: TCP
+          port: 6333
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tika-access
+  namespace: openwebui
+spec:
+  podSelector:
+    matchLabels:
+      app: tika
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: openwebui
+      ports:
+        - protocol: TCP
+          port: 9998
+
+---
+# Traefik ServersTransport — long timeouts for streaming/WebSocket, HTTP/2 disabled
+# so Traefik speaks HTTP/1.1 to the backend (required for WebSocket upgrade).
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: openwebui-transport
+  namespace: openwebui
+spec:
+  disableHTTP2: true
+  forwardingTimeouts:
+    dialTimeout: 30s
+    idleConnTimeout: 300s
+    responseHeaderTimeout: 300s
+
+---
+# SITE-SPECIFIC: Traefik IngressRoute — change Host match and TLS secretName to your domain
+# No buffering middleware needed: Traefik streams responses by default.
+# serversTransport provides the 300s timeouts + HTTP/1.1 for WebSocket/SSE.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: openwebui
+  namespace: openwebui
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`llm.vulcan.alliancecan.ca`)
+      services:
+        - name: openwebui
+          port: 80
+          serversTransport: openwebui-transport
+  tls:
+    secretName: openwebui-vulcan-alliancecan-ca-tls
+
+---
+# SITE-SPECIFIC: TLS Certificate — change to your domain and ClusterIssuer
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openwebui-vulcan-alliancecan-ca
+  namespace: openwebui
+spec:
+  secretName: openwebui-vulcan-alliancecan-ca-tls
+  issuerRef:
+    name: letsencrypt-dns
+    kind: ClusterIssuer
+  commonName: llm.vulcan.alliancecan.ca
+  dnsNames:
+    - llm.vulcan.alliancecan.ca

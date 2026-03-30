@@ -9,43 +9,44 @@
 
 ## Description
 
-This repository contains the Kubernetes deployment configuration for **Open WebUI** - a production-ready, scalable deployment with PostgreSQL, Redis, LDAP authentication, RAG capabilities, and horizontal pod autoscaling.
-
-The deployment provides a comprehensive Open WebUI setup suitable for HPC clusters and Kubernetes environments. This repository serves as both a working deployment template and a comprehensive reference that can be adapted for other Kubernetes clusters.
+Kubernetes deployment configuration for **Open WebUI** on the Vulcan RKE2 cluster. Production-hardened with Qdrant vector database, PostgreSQL, Redis, OAuth/OIDC authentication, and Kubeflow inference endpoints.
 
 **Key Features:**
-- **Multi-pod deployment** with horizontal pod autoscaling (2-10 replicas)
-- **PostgreSQL database** for shared data storage across pods
+- **3-replica deployment** with zero-downtime rolling updates and pod anti-affinity
+- **Qdrant** vector database for scalable RAG embeddings (Helm-deployed)
+- **PostgreSQL 16** for application data
 - **Redis** for session management and websocket coordination
-- **LDAP authentication** integrated with LDAP servers
-- **RAG (Retrieval Augmented Generation)** with hybrid search enabled
-- **Web search** via Perplexity AI
-- **Voice mode** with local Whisper STT
-- **Persistent storage** for application data and databases
+- **OAuth/OIDC** authentication via Digital Research Alliance of Canada
+- **RAG** with hybrid search, BGE-M3 embeddings, and reranking via Kubeflow inference
+- **Apache Tika** for document extraction with HPA (1-4 replicas)
+- **NetworkPolicies** restricting backend access to OpenWebUI pods only
+- **Traefik IngressRoute** with ServersTransport for WebSocket/streaming support
 
 ---
 
 ## Architecture
 
-The deployment consists of the following components:
-
-### Core Services
-- **OpenWebUI**: Main application deployment (2-10 pods, auto-scaling)
-- **PostgreSQL 16**: Shared database for all OpenWebUI pods (1 replica) with pgvector extension
-- **Redis 7.2**: Session storage and websocket manager (1 replica)
-- **Apache Tika**: Content extraction engine for RAG document processing (1 replica)
+### Services
+| Service | Image | Replicas | Purpose |
+|---|---|---|---|
+| Open WebUI | `ghcr.io/open-webui/open-webui:latest` | 3 | Main application |
+| Qdrant | `qdrant/qdrant` (Helm) | 1 | Vector database for RAG |
+| PostgreSQL | `postgres:16` | 1 | Application database |
+| Redis | `redis:latest` | 1 | Sessions, websockets, cache |
+| Apache Tika | `apache/tika:latest-full` | 1-4 (HPA) | Document extraction |
 
 ### Infrastructure
-- **Namespace**: `openwebui`
-- **Storage**: NFS-based persistent volumes (50Gi for app data, 20Gi for PostgreSQL, 1Gi for Redis)
-- **Ingress**: Traefik with sticky sessions enabled
-- **Autoscaling**: HorizontalPodAutoscaler based on CPU (70%) and memory (80%) utilization
+- **Namespace:** `openwebui`
+- **Storage:** NFS-backed PVCs via `nfs-client` StorageClass
+- **Ingress:** Traefik IngressRoute with ServersTransport (300s timeouts, HTTP/2 disabled for WebSocket)
+- **TLS:** cert-manager with Let's Encrypt DNS validation
 
-### Authentication
-- **LDAP**: Integrated with LDAP servers (LDAPS)
-  - Primary and secondary LDAP servers configured via hostAliases
-  - Base DN: `dc=example,dc=com` (configure as needed)
-  - Username attribute: `uid`
+### Network Security
+All backend services are protected by NetworkPolicies:
+- `postgres-access` — port 5432, OpenWebUI pods only
+- `redis-access` — port 6379, OpenWebUI pods only
+- `qdrant-access` — ports 6333/6334, OpenWebUI pods + Prometheus
+- `tika-access` — port 9998, OpenWebUI pods only
 
 ---
 
@@ -53,120 +54,227 @@ The deployment consists of the following components:
 
 ### Prerequisites
 
-- Kubernetes cluster (RKE2 tested)
-- Traefik ingress controller
-- NFS storage class (`nfs-client`)
-- Access to LDAP servers (if using LDAP authentication)
+- RKE2 Kubernetes cluster with Rancher
+- Traefik ingress controller (with `kubernetescrd` provider enabled)
+- cert-manager with a `ClusterIssuer` named `letsencrypt-dns`
+- `nfs-client` StorageClass
+- Cilium CNI (for NetworkPolicy enforcement)
+- Helm 3.x
+- Qdrant Helm repo: `helm repo add qdrant https://qdrant.to/helm`
 
-### Quick Start
+### Files
 
-1. **Update secrets** - Edit the `openwebui-secrets` in `openwebui.yaml`:
-   - `webui-secret-key`: Generate a secure random key for session encryption
-   - `postgres-password`: Set a strong PostgreSQL password
-   - `database-url`: Update with your PostgreSQL password (must match postgres-password)
-   - `perplexity-api-key`: Add your Perplexity API key (if using web search)
-   - `youtube-loader-api-key`: Add your YouTube API key (if using YouTube loader)
+| File | Description |
+|---|---|
+| `openwebui-secrets.yaml` | Kubernetes Secret (template with `CHANGEME` placeholders) — apply first |
+| `openwebui.yaml` | Full deployment manifest (deployments, services, PVCs, network policies, ingress) |
+| `qdrant-values.yaml` | Helm values for the Qdrant vector database |
+| `.gitignore` | Prevents accidental commit of sensitive files |
 
-2. **Deploy**:
-   ```bash
-   kubectl apply -f openwebui.yaml
-   ```
+### Step 1: Configure and Apply Secrets
 
-3. **Verify deployment**:
-   ```bash
-   kubectl get pods -n openwebui
-   kubectl get svc -n openwebui
-   ```
+Edit `openwebui-secrets.yaml` and replace all `CHANGEME` values:
 
-4. **Check database connection**:
-   ```bash
-   kubectl exec -n openwebui <openwebui-pod> -- env | grep DATABASE_URL
-   kubectl logs -n openwebui <openwebui-pod> | grep -i postgres
-   ```
+| Key | Description |
+|---|---|
+| `webui-secret-key` | Random string for session encryption (must be consistent across replicas) |
+| `postgres-password` | PostgreSQL password |
+| `database-url` | Connection string (see below) |
+| `redis-password` | Redis password |
+| `redis-url` | Connection string (see below) |
+| `qdrant-api-key` | API key for Qdrant authentication |
+| `oauth-client-secret` | OIDC client secret from identity provider |
+| `perplexity-api-key` | Perplexity API key for web search |
+| `youtube-loader-api-key` | YouTube Data API key |
+| `openai-api-key` | OpenAI-compatible API key (or placeholder) |
+| `inference-api-key` | Kubeflow inference API key (or placeholder) |
 
-### Configuration
+> **About the URL secrets:** `database-url` and `redis-url` are stored as secrets because they embed the password. The URL format itself is known — only the password portion is sensitive. Construct them from the passwords you chose:
+>
+> ```
+> database-url = postgresql://openwebui:<POSTGRES_PASSWORD>@postgres:5432/openwebui
+> redis-url    = redis://default:<REDIS_PASSWORD>@redis:6379/0
+> ```
+>
+> For example, if your `postgres-password` is `myS3cretPW`, then `database-url` is `postgresql://openwebui:myS3cretPW@postgres:5432/openwebui`. The same applies to `redis-url` with `redis-password`.
 
-Key environment variables configured:
-- `WEBUI_SECRET_KEY`: Required for multi-pod session sharing
-- `DATABASE_URL`: PostgreSQL connection string
-- `REDIS_URL`: Redis connection for caching and sessions
-- `WEBSOCKET_REDIS_URL`: Redis connection for websocket coordination
-- `VECTOR_DB`: pgvector for RAG embeddings
-- `ENABLE_LDAP`: LDAP authentication enabled
-- `ENABLE_RAG`: RAG features enabled
-- `ENABLE_WEB_SEARCH`: Web search via Perplexity enabled
-- `CONTENT_EXTRACTION_ENGINE`: Apache Tika for document processing
-- `ENABLE_IMAGE_GENERATION`: Image generation via AUTOMATIC1111 enabled
+### Step 2: Apply Secrets
 
-### Scaling
+```bash
+kubectl apply -f openwebui-secrets.yaml
+```
 
-The deployment automatically scales based on resource usage:
-- **Minimum replicas**: 2
-- **Maximum replicas**: 10
-- **Scale triggers**: CPU > 70% or Memory > 80%
-- **Scale down**: 50% reduction per minute (5 min stabilization)
-- **Scale up**: 100% increase per 30 seconds or +2 pods per 30 seconds
+This creates the namespace and the `openwebui-secrets` Secret. Both Qdrant (Helm) and OpenWebUI reference this secret via `secretKeyRef`, so it **must exist first**.
+
+### Step 3: Deploy Qdrant via Helm
+
+```bash
+helm repo add qdrant https://qdrant.to/helm
+helm repo update
+helm install qdrant qdrant/qdrant -n openwebui -f qdrant-values.yaml
+```
+
+Qdrant reads its API key from the `openwebui-secrets` secret (via `secretKeyRef`), so Step 2 must be done first.
+
+### Step 4: Deploy OpenWebUI and Services
+
+```bash
+kubectl apply -f openwebui.yaml
+```
+
+This creates PVCs, all deployments (Postgres, Redis, Tika, OpenWebUI), services, NetworkPolicies, and Traefik ingress resources.
+
+> **First-time deploy note:** PVCs are created on first apply. If re-applying, existing PVCs are left untouched (immutable).
+
+### Step 5: Verify
+
+```bash
+# All pods running
+kubectl get pods -n openwebui
+
+# OpenWebUI health
+kubectl exec -n openwebui deploy/openwebui -- curl -s http://localhost:8080/health
+
+# Qdrant health
+kubectl exec -n openwebui deploy/openwebui -- curl -s http://qdrant:6333/healthz
+
+# Qdrant collections (after uploading a document)
+kubectl exec -n openwebui deploy/openwebui -- curl -s \
+  -H "api-key: $(kubectl get secret openwebui-secrets -n openwebui -o jsonpath='{.data.qdrant-api-key}' | base64 -d)" \
+  http://qdrant:6333/collections
+```
 
 ---
 
-## Features Enabled
+## Upgrading
 
-### Core Features
-- ✅ LDAP authentication (configurable LDAP servers)
-- ✅ RAG with hybrid search (BM25 + vector) using pgvector
-- ✅ Apache Tika for document content extraction (OCR support)
-- ✅ Web search (Perplexity AI)
-- ✅ Image generation (AUTOMATIC1111 compatible)
-- ✅ Voice mode (local Whisper STT)
-- ✅ Model caching (base models and TTL-based)
-- ✅ Workspaces and sharing
-- ✅ API keys
-- ✅ Community sharing
-- ✅ YouTube loader for transcript extraction
-- ✅ Google Drive and OneDrive integration (user-configured)
+### Qdrant
 
-### Storage & Persistence
-- ✅ PostgreSQL 16 with pgvector extension for database and vector storage
-- ✅ Redis for sessions and websockets (shared across pods)
-- ✅ Persistent volumes for application data (50Gi), PostgreSQL (20Gi), and Redis (1Gi)
+```bash
+helm upgrade qdrant qdrant/qdrant -n openwebui -f qdrant-values.yaml
+```
 
-### Security
-- ✅ LDAP authentication (signup disabled)
-- ✅ Shared secret key for session encryption
-- ✅ Sticky sessions via Traefik
-- ✅ Pod disruption budget (min 1 available)
+### OpenWebUI and other services
+
+```bash
+kubectl apply -f openwebui.yaml
+```
+
+> If changing env vars from `value` to `valueFrom` (or vice versa), use `kubectl replace -f openwebui.yaml` instead — Kubernetes strategic merge can't handle that transition.
+
+### Rollout restart (pull latest images)
+
+```bash
+kubectl rollout restart deploy/openwebui -n openwebui
+```
+
+---
+
+## Configuration
+
+### Key Environment Variables
+
+| Category | Variable | Description |
+|---|---|---|
+| **Auth** | `OAUTH_CLIENT_ID` | OIDC client identifier |
+| **Auth** | `OPENID_PROVIDER_URL` | OIDC discovery endpoint |
+| **Vector DB** | `VECTOR_DB=qdrant` | Use Qdrant for embeddings |
+| **Vector DB** | `QDRANT_URI` | Qdrant HTTP endpoint |
+| **Vector DB** | `ENABLE_QDRANT_MULTITENANCY_MODE` | Shared collections with resource isolation |
+| **RAG** | `RAG_EMBEDDING_ENGINE=openai` | Embedding via Kubeflow inference |
+| **RAG** | `RAG_EMBEDDING_MODEL=bge-m3` | BGE-M3 multilingual embeddings |
+| **RAG** | `ENABLE_RAG_HYBRID_SEARCH` | BM25 + vector hybrid search |
+| **Cache** | `REDIS_URL` | Redis connection for caching |
+| **Cache** | `WEBSOCKET_MANAGER=redis` | Redis-backed websocket coordination |
+| **Search** | `WEB_SEARCH_ENGINE=perplexity_search` | Perplexity for web search |
+| **Audio** | `AUDIO_STT_ENGINE=openai` | Whisper via Kubeflow inference |
+| **Audio** | `AUDIO_TTS_ENGINE=openai` | Kokoro TTS via Kubeflow inference |
+| **Images** | `IMAGE_GENERATION_ENGINE=openai` | Kandinsky-3 via Kubeflow inference |
+
+### Qdrant Notes
+
+Qdrant runs on NFS storage (`nfs-client`). It logs a warning about NFS filesystem checks on startup — this is expected and documented in `qdrant-values.yaml`. Snapshot persistence is enabled as a recovery safety net.
+
+---
+
+## Customization for Other Sites
+
+This deployment is the live Vulcan configuration. Other Alliance sites (or any Kubernetes environment) can use it as a starting point by modifying values marked with `# SITE-SPECIFIC` comments in the manifests. Here's a summary of what to change:
+
+### `openwebui.yaml`
+
+| Section | What to Change |
+|---|---|
+| **`hostAliases`** | Remove or replace with your internal DNS entries (LDAP servers, etc.). Not needed if your cluster DNS handles these. |
+| **`WEBUI_NAME`** | Your instance name (shown in the UI title bar) |
+| **`WEBUI_URL`** | Your public HTTPS URL |
+| **OAuth / OIDC block** | `OAUTH_CLIENT_ID`, `OPENID_PROVIDER_URL`, `OAUTH_PROVIDER_NAME`, `OAUTH_SCOPES`, `OPENID_REDIRECT_URI`, `OAUTH_EMAIL_CLAIM` — all depend on your identity provider. If not using OIDC, set `ENABLE_LOGIN_FORM=true` and remove the OAuth env vars. |
+| **Inference endpoints** | `RAG_OPENAI_API_BASE_URL`, `AUDIO_STT_OPENAI_API_BASE_URL`, `AUDIO_TTS_OPENAI_API_BASE_URL`, `OPENAI_API_BASE_URL`, `IMAGES_OPENAI_API_BASE_URL`, `IMAGES_EDIT_OPENAI_API_BASE_URL` — point these at your OpenAI-compatible inference service, or use the real OpenAI API (`https://api.openai.com/v1`). |
+| **Model names** | `RAG_EMBEDDING_MODEL`, `AUDIO_STT_MODEL`, `AUDIO_TTS_MODEL`, `IMAGE_GENERATION_MODEL`, `IMAGE_EDIT_MODEL` — match the models available at your inference endpoints. |
+| **`storageClassName`** | All PVCs use `nfs-client`. Change to your cluster's StorageClass. |
+| **IngressRoute** | Change `Host(...)` match and `tls.secretName` to your domain. |
+| **Certificate** | Change `commonName`, `dnsNames`, and `issuerRef` to match your domain and cert-manager setup. |
+| **Secrets** | All `CHANGEME` values — these are always site-specific. |
+
+### `qdrant-values.yaml`
+
+| Section | What to Change |
+|---|---|
+| **`storageClassName`** | Both `persistence` and `snapshotPersistence` — match your cluster. |
+| **`metrics.serviceMonitor.additionalLabels`** | `release: rancher-monitoring` — match your Prometheus operator's label selector. Remove the entire `metrics` block if you don't use Prometheus. |
+
+### Optional: Features to Remove
+
+If your site doesn't have certain capabilities, you can safely remove these env var blocks:
+
+- **Image generation/editing** — remove `ENABLE_IMAGE_GENERATION`, `IMAGE_*`, `IMAGES_*` vars
+- **Audio STT/TTS** — remove `AUDIO_*` vars and `ENABLE_VOICE_MODE` / `VOICE_MODE_*` vars
+- **Web search** — remove `ENABLE_WEB_SEARCH`, `WEB_SEARCH_ENGINE`, `PERPLEXITY_API_KEY` vars
+- **YouTube loader** — remove `ENABLE_YOUTUBE_LOADER`, `YOUTUBE_LOADER_API_KEY` vars
 
 ---
 
 ## Troubleshooting
 
-### Verify PostgreSQL is being used
+### Check pod status and logs
 ```bash
-kubectl exec -n openwebui <pod> -- env | grep DATABASE_URL
-kubectl logs -n openwebui <pod> | grep -i "PostgresqlImpl"
+kubectl get pods -n openwebui
+kubectl logs deploy/openwebui -n openwebui --tail=50
+kubectl logs deploy/postgres -n openwebui --tail=50
+kubectl logs deploy/redis -n openwebui --tail=20
+kubectl logs qdrant-0 -n openwebui --tail=20
 ```
 
-### Check Redis connections
+### Verify Postgres
 ```bash
-kubectl exec -n openwebui redis-<pod> -- redis-cli -a YOUR_REDIS_PASSWORD_HERE ping
+kubectl exec -n openwebui deploy/postgres -- psql -U openwebui -d openwebui -c "SELECT version();"
+kubectl exec -n openwebui deploy/postgres -- pg_isready -U openwebui
 ```
 
-### Check PostgreSQL connections
+### Verify Redis
 ```bash
-kubectl exec -n openwebui postgres-<pod> -- psql -U openwebui -d openwebui -c "SELECT count(*) FROM pg_stat_activity WHERE datname = 'openwebui';"
+kubectl exec -n openwebui deploy/redis -- redis-cli -a "$REDIS_PASSWORD" ping
 ```
 
-### View pod logs
+### Verify Qdrant connectivity from OpenWebUI
 ```bash
-kubectl logs -n openwebui <openwebui-pod> --tail=50
-kubectl logs -n openwebui postgres-<pod>
-kubectl logs -n openwebui redis-<pod>
-kubectl logs -n openwebui tika-<pod>
+kubectl exec -n openwebui deploy/openwebui -- curl -s http://qdrant:6333/healthz
 ```
 
-### Check secrets
+### Check Traefik routing
 ```bash
-kubectl get secret -n openwebui openwebui-secrets -o yaml
+kubectl get ingressroute -n openwebui
+kubectl get serverstransport -n openwebui
+```
+
+### Postgres WAL recovery
+If Postgres fails with `PANIC: could not locate a valid checkpoint record` after an unclean shutdown on NFS:
+```bash
+kubectl scale deploy postgres -n openwebui --replicas=0
+kubectl run pg-repair --rm -it --restart=Never -n openwebui \
+  --image=postgres:16 \
+  --overrides='{"spec":{"containers":[{"name":"pg-repair","image":"postgres:16","command":["bash","-c","su - postgres -c \"/usr/lib/postgresql/16/bin/pg_resetwal -f /var/lib/postgresql/data\""],"volumeMounts":[{"name":"data","mountPath":"/var/lib/postgresql/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"postgres-data"}}]}}'
+kubectl scale deploy postgres -n openwebui --replicas=1
 ```
 
 ---
@@ -175,13 +283,15 @@ kubectl get secret -n openwebui openwebui-secrets -o yaml
 
 * [Open WebUI Documentation](https://docs.openwebui.com/)
 * [Open WebUI GitHub](https://github.com/open-webui/open-webui)
+* [Qdrant Documentation](https://qdrant.tech/documentation/)
+* [Qdrant Helm Chart](https://github.com/qdrant/qdrant-helm)
 * [Digital Research Alliance of Canada](https://alliancecanada.ca/)
 * [PAICE (Pan-Canadian AI Compute Environment)](https://alliancecan.ca/en/services/advanced-research-computing/pan-canadian-ai-compute-environment-paice)
 * [Research Computing Group](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html)
 
 ---
 
-## 🤝 Support
+## Support
 
 Many Bothans died to bring us this information. This project is provided as-is, but reasonable questions may be answered based on my coffee intake or mood. ;)
 
@@ -189,22 +299,12 @@ Feel free to open an issue or email **[khoja1@ualberta.ca](mailto:khoja1@ualbert
 
 ---
 
-## 📜 License
+## License
 
-This project is released under the **MIT License** - one of the most permissive open-source licenses available.
-
-**What this means:**
-- ✅ Use it for anything (personal, commercial, whatever)
-- ✅ Modify it however you want
-- ✅ Distribute it freely
-- ✅ Include it in proprietary software
-
-**The only requirement:** Keep the copyright notice somewhere in your project.
-
-**Full license text:** [MIT License](./LICENSE)
+This project is released under the **MIT License** — see [LICENSE](./LICENSE) for details.
 
 ---
 
-## 🧠 About University of Alberta Research Computing
+## About University of Alberta Research Computing
 
 The [Research Computing Group](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html) supports high-performance computing, data-intensive research, and advanced infrastructure for researchers at the University of Alberta and across Canada.
