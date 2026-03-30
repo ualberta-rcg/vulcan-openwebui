@@ -45,7 +45,7 @@ Kubernetes deployment configuration for **Open WebUI** on the Vulcan RKE2 cluste
 All backend services are protected by NetworkPolicies:
 - `postgres-access` — port 5432, OpenWebUI pods only
 - `redis-access` — port 6379, OpenWebUI pods only
-- `qdrant-access` — ports 6333/6334, OpenWebUI pods + Prometheus
+- `qdrant-access` — ports 6333/6334 (OpenWebUI pods + Prometheus), port 6335 (Qdrant p2p for Raft consensus)
 - `tika-access` — port 9998, OpenWebUI pods only
 
 ---
@@ -135,8 +135,13 @@ kubectl get pods -n openwebui
 # OpenWebUI health
 kubectl exec -n openwebui deploy/openwebui -- curl -s http://localhost:8080/health
 
-# Qdrant health
+# HPA status
+kubectl get hpa -n openwebui
+
+# Qdrant health and cluster status
 kubectl exec -n openwebui deploy/openwebui -- curl -s http://qdrant:6333/healthz
+kubectl exec -n openwebui deploy/openwebui -- curl -s http://qdrant:6333/cluster \
+  -H "api-key: $(kubectl get secret openwebui-secrets -n openwebui -o jsonpath='{.data.qdrant-api-key}' | base64 -d)"
 
 # Qdrant collections (after uploading a document)
 kubectl exec -n openwebui deploy/openwebui -- curl -s \
@@ -222,6 +227,7 @@ This deployment is the live Vulcan configuration. Other Alliance sites (or any K
 
 | Section | What to Change |
 |---|---|
+| **`replicaCount`** | Number of Qdrant nodes. Vulcan uses 5 (one per node). Adjust to match your cluster size, or use 1 for small deployments (set `config.cluster.enabled: false` if single-node). |
 | **`storageClassName`** | Both `persistence` and `snapshotPersistence` — match your cluster. |
 | **`metrics.serviceMonitor.additionalLabels`** | `release: rancher-monitoring` — match your Prometheus operator's label selector. Remove the entire `metrics` block if you don't use Prometheus. |
 
@@ -308,6 +314,25 @@ kubectl exec -n openwebui deploy/redis -- sh -c 'redis-cli -a "$REDIS_PASSWORD" 
 ### Verify Qdrant connectivity from OpenWebUI
 ```bash
 kubectl exec -n openwebui deploy/openwebui -- curl -s http://qdrant:6333/healthz
+```
+
+### Check auto-scaling
+```bash
+# HPA status and current replica counts
+kubectl get hpa -n openwebui
+
+# Current resource usage per pod
+kubectl top pods -n openwebui
+```
+
+### Verify Qdrant cluster
+```bash
+# All 5 nodes should show Ready
+kubectl get pods -n openwebui -l app.kubernetes.io/name=qdrant
+
+# Raft cluster status (check all peers connected, leader elected)
+kubectl exec -n openwebui deploy/openwebui -- curl -s http://qdrant:6333/cluster \
+  -H "api-key: $(kubectl get secret openwebui-secrets -n openwebui -o jsonpath='{.data.qdrant-api-key}' | base64 -d)"
 ```
 
 ### Check Traefik routing
