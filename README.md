@@ -12,7 +12,7 @@
 Kubernetes deployment configuration for **Open WebUI** on the Vulcan RKE2 cluster. Production-hardened with Qdrant vector database, PostgreSQL, Redis, OAuth/OIDC authentication, and Kubeflow inference endpoints.
 
 **Key Features:**
-- **3-replica deployment** with zero-downtime rolling updates and pod anti-affinity
+- **Auto-scaling deployment** (2-15 replicas via HPA) with zero-downtime rolling updates and pod anti-affinity
 - **Qdrant** vector database for scalable RAG embeddings (Helm-deployed)
 - **PostgreSQL 16** for application data
 - **Redis** for session management and websocket coordination
@@ -29,7 +29,7 @@ Kubernetes deployment configuration for **Open WebUI** on the Vulcan RKE2 cluste
 ### Services
 | Service | Image | Replicas | Purpose |
 |---|---|---|---|
-| Open WebUI | `ghcr.io/open-webui/open-webui:latest` | 3 | Main application |
+| Open WebUI | `ghcr.io/open-webui/open-webui:latest` | 2-15 (HPA) | Main application |
 | Qdrant | `qdrant/qdrant` (Helm) | 1 | Vector database for RAG |
 | PostgreSQL | `postgres:16` | 1 | Application database |
 | Redis | `redis:latest` | 1 | Sessions, websockets, cache |

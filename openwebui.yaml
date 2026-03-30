@@ -299,7 +299,7 @@ metadata:
   labels:
     app: openwebui
 spec:
-  replicas: 3
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -727,10 +727,10 @@ spec:
           resources:
             requests:
               cpu: "500m"
-              memory: "1Gi"
+              memory: "2Gi"
             limits:
-              cpu: "4"
-              memory: "8Gi"
+              cpu: "5"
+              memory: "2Gi"
 
       volumes:
         - name: data
@@ -758,6 +758,34 @@ spec:
       port: 80
       targetPort: http
   type: ClusterIP
+
+---
+# Open WebUI HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: openwebui
+  namespace: openwebui
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: openwebui
+  minReplicas: 2
+  maxReplicas: 15
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
 
 ---
 # PodDisruptionBudget
