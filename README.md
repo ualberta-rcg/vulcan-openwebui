@@ -98,15 +98,15 @@ Edit `openwebui-secrets.yaml` and replace all `CHANGEME` values:
 >
 > For example, if your `postgres-password` is `myS3cretPW`, then `database-url` is `postgresql://openwebui:myS3cretPW@postgres:5432/openwebui`. The same applies to `redis-url` with `redis-password`.
 
-### Step 2: Apply Secrets
+Then apply:
 
 ```bash
 kubectl apply -f openwebui-secrets.yaml
 ```
 
-This creates the namespace and the `openwebui-secrets` Secret. Both Qdrant (Helm) and OpenWebUI reference this secret via `secretKeyRef`, so it **must exist first**.
+This creates the namespace and the `openwebui-secrets` Secret. Both Qdrant (Helm) and OpenWebUI reference this secret via `secretKeyRef`, so it **must exist before either is deployed**.
 
-### Step 3: Deploy Qdrant via Helm
+### Step 2: Deploy Qdrant via Helm
 
 ```bash
 helm repo add qdrant https://qdrant.to/helm
@@ -114,9 +114,9 @@ helm repo update
 helm install qdrant qdrant/qdrant -n openwebui -f qdrant-values.yaml
 ```
 
-Qdrant reads its API key from the `openwebui-secrets` secret (via `secretKeyRef`), so Step 2 must be done first.
+Qdrant reads its API key from the `openwebui-secrets` secret (via `secretKeyRef`), so Step 1 must be done first.
 
-### Step 4: Deploy OpenWebUI and Services
+### Step 3: Deploy OpenWebUI and Services
 
 ```bash
 kubectl apply -f openwebui.yaml
@@ -124,9 +124,9 @@ kubectl apply -f openwebui.yaml
 
 This creates PVCs, all deployments (Postgres, Redis, Tika, OpenWebUI), services, NetworkPolicies, and Traefik ingress resources.
 
-> **First-time deploy note:** PVCs are created on first apply. If re-applying, existing PVCs are left untouched (immutable).
+> **First-time deploy note:** PVCs are created on first apply. If re-applying, existing PVCs are left untouched (immutable). New sites should use `ReadWriteMany` for `openwebui-data` if your StorageClass supports it — see the comment in the manifest.
 
-### Step 5: Verify
+### Step 4: Verify
 
 ```bash
 # All pods running
@@ -234,6 +234,53 @@ If your site doesn't have certain capabilities, you can safely remove these env 
 
 ---
 
+## Backup and Restore
+
+### PostgreSQL
+
+**Backup:**
+```bash
+kubectl exec -n openwebui deploy/postgres -- \
+  pg_dump -U openwebui -d openwebui -Fc > openwebui-pg-backup-$(date +%Y%m%d).dump
+```
+
+**Restore:**
+```bash
+kubectl exec -i -n openwebui deploy/postgres -- \
+  pg_restore -U openwebui -d openwebui --clean --if-exists < openwebui-pg-backup-YYYYMMDD.dump
+```
+
+### Qdrant
+
+Qdrant snapshot persistence is enabled in `qdrant-values.yaml`. To create a manual snapshot of all collections:
+
+```bash
+kubectl exec -n openwebui deploy/openwebui -- \
+  curl -s -X POST http://qdrant:6333/snapshots \
+  -H "api-key: $(kubectl get secret openwebui-secrets -n openwebui -o jsonpath='{.data.qdrant-api-key}' | base64 -d)"
+```
+
+Snapshots are stored on the `qdrant-snapshots` PVC. To list available snapshots:
+
+```bash
+kubectl exec -n openwebui deploy/openwebui -- \
+  curl -s http://qdrant:6333/snapshots \
+  -H "api-key: $(kubectl get secret openwebui-secrets -n openwebui -o jsonpath='{.data.qdrant-api-key}' | base64 -d)"
+```
+
+> **Note:** If Qdrant data is lost, you can also re-index from OpenWebUI: Admin Settings > Documents > Reindex Knowledge Base. This rebuilds vectors from the source documents stored in PostgreSQL.
+
+### OpenWebUI Data Volume
+
+The `openwebui-data` PVC holds uploaded files and cache. Back up with:
+
+```bash
+kubectl exec -n openwebui deploy/openwebui -- \
+  tar czf - /app/backend/data > openwebui-data-backup-$(date +%Y%m%d).tar.gz
+```
+
+---
+
 ## Troubleshooting
 
 ### Check pod status and logs
@@ -253,7 +300,7 @@ kubectl exec -n openwebui deploy/postgres -- pg_isready -U openwebui
 
 ### Verify Redis
 ```bash
-kubectl exec -n openwebui deploy/redis -- redis-cli -a "$REDIS_PASSWORD" ping
+kubectl exec -n openwebui deploy/redis -- sh -c 'redis-cli -a "$REDIS_PASSWORD" ping'
 ```
 
 ### Verify Qdrant connectivity from OpenWebUI

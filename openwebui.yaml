@@ -30,10 +30,16 @@ spec:
       labels:
         app: postgres
     spec:
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
       containers:
         - name: postgres
           image: postgres:16
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: 5432
           env:
@@ -118,10 +124,16 @@ spec:
       labels:
         app: redis
     spec:
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
       containers:
         - name: redis
           image: redis:latest
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: 6379
           env:
@@ -198,6 +210,8 @@ spec:
         - name: tika
           image: apache/tika:latest-full
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: 9998
           readinessProbe:
@@ -265,8 +279,9 @@ metadata:
   name: openwebui-data
   namespace: openwebui
 spec:
-  # NOTE: Ideally ReadWriteMany for multi-replica, but existing PVC is RWO and
-  # accessModes are immutable. NFS-backed RWO still allows multi-attach in practice.
+  # SITE-SPECIFIC: New deployments should use ReadWriteMany for multi-replica.
+  # Vulcan uses RWO because the existing PVC was created as RWO and accessModes
+  # are immutable. NFS-backed RWO still allows multi-attach in practice.
   accessModes:
     - ReadWriteOnce
   resources:
@@ -327,6 +342,8 @@ spec:
         - name: openwebui
           image: ghcr.io/open-webui/open-webui:latest
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: 8080
               name: http
@@ -493,14 +510,14 @@ spec:
                   key: inference-api-key
 
             - name: RAG_EMBEDDING_MODEL
-              value: "bge-m3"
+              value: "bge-m3"  # SITE-SPECIFIC: must match a model at your inference endpoint
 
             # ---- RAG Reranking ----
             - name: ENABLE_RAG_RERANKING
               value: "true"
 
             - name: RAG_RERANKING_MODEL
-              value: "bge-reranker-v2-m3"
+              value: "bge-reranker-v2-m3"  # SITE-SPECIFIC
 
             # ---- Audio STT (Kubeflow inference) ----
             - name: AUDIO_STT_ENGINE
@@ -516,7 +533,7 @@ spec:
                   key: inference-api-key
 
             - name: AUDIO_STT_MODEL
-              value: "whisper-large-v3"
+              value: "whisper-large-v3"  # SITE-SPECIFIC
 
             # ---- Audio TTS (Kubeflow inference) ----
             - name: AUDIO_TTS_ENGINE
@@ -532,10 +549,10 @@ spec:
                   key: inference-api-key
 
             - name: AUDIO_TTS_MODEL
-              value: "kokoro-82m"
+              value: "kokoro-82m"  # SITE-SPECIFIC
 
             - name: AUDIO_TTS_VOICE
-              value: "af_bella"
+              value: "af_bella"  # SITE-SPECIFIC
 
             # ---- Web Search (Perplexity) ----
             - name: ENABLE_WEB_SEARCH
@@ -646,13 +663,13 @@ spec:
                   key: inference-api-key
 
             - name: IMAGE_GENERATION_MODEL
-              value: "kandinsky-3"
+              value: "kandinsky-3"  # SITE-SPECIFIC
 
             - name: IMAGE_SIZE
-              value: "768x768"
+              value: "768x768"  # SITE-SPECIFIC
 
             - name: IMAGE_STEPS
-              value: "80"
+              value: "80"  # SITE-SPECIFIC
 
             # ---- Image Editing (Kubeflow inference - kandinsky-3) ----
             - name: ENABLE_IMAGE_EDIT
@@ -674,7 +691,7 @@ spec:
                   key: inference-api-key
 
             - name: IMAGE_EDIT_MODEL
-              value: "kandinsky-3"
+              value: "kandinsky-3"  # SITE-SPECIFIC
 
             # ---- WebSocket / Logging ----
             - name: ENABLE_WEBSOCKET_SUPPORT
@@ -719,6 +736,8 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: openwebui-data
+        # SITE-SPECIFIC: mounts node CA certs so OpenWebUI trusts internal TLS endpoints.
+        # Remove if your cluster doesn't use internal CAs, or change path as needed.
         - name: ca-certs
           hostPath:
             path: /etc/ssl/certs
@@ -748,7 +767,7 @@ metadata:
   name: openwebui
   namespace: openwebui
 spec:
-  minAvailable: 1
+  minAvailable: 2
   selector:
     matchLabels:
       app: openwebui
@@ -818,6 +837,7 @@ spec:
           port: 6333
         - protocol: TCP
           port: 6334
+    # SITE-SPECIFIC: allow Prometheus scraping — change namespace to match your monitoring stack
     - from:
         - namespaceSelector:
             matchLabels:
